@@ -1,6 +1,7 @@
 import argparse
 import cv2
 import numpy as np
+import pandas as pd
 from ultralytics import YOLO
 import time
 
@@ -81,6 +82,8 @@ def main():
     # Выбор видео
     video = cv2.VideoCapture(f"videos/{args.video}")
 
+    FPS = video.get(cv2.CAP_PROP_FPS)
+
     select_window_name = f"Select tabel {args.video}"
     video_name = str(args.video)
 
@@ -129,6 +132,16 @@ def main():
     candidate_start_time = None
     candidate_end_time = None
     last_seen_time = None  # последний момент, когда человек был в полигоне
+    events = []
+
+    # Создаём объект для записи видео
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # кодек для .mp4
+    output_video = cv2.VideoWriter(
+        f"output/output_{args.video}",  # путь к файлу
+        fourcc,
+        FPS,
+        RESOLUTION
+    )
 
     while True:
         ret, frame = video.read()
@@ -137,6 +150,7 @@ def main():
 
         # Определение кадра
         frame_small = cv2.resize(frame, RESOLUTION)
+        frame_number = int(video.get(cv2.CAP_PROP_POS_FRAMES)) - 1
         results = model(frame_small)[0]
 
         # Определение и отрисовка людей в кадре
@@ -189,11 +203,14 @@ def main():
                 prev_occupied = True
                 candidate_start_time = None
                 candidate_end_time = None
+                events.append({"timestamp_sec": (frame_number / FPS), "event": "table_occupied"})
+
         else:
             if candidate_end_time is not None and (now - candidate_end_time) >= DEBOUNCE_TIME:
                 prev_occupied = False
                 candidate_start_time = None
                 candidate_end_time = None
+                events.append({"timestamp_sec": (frame_number / FPS), "event": "table_empty"})
 
         # Присваиваем цвет состояния столу
         state_color = OCCUPIED_COLOR if prev_occupied else FREE_COLOR
@@ -203,6 +220,9 @@ def main():
         # Отображение самого видео
         cv2.imshow(video_name, frame_small)
 
+        # Запись в видео
+        output_video.write(frame_small)
+
         # Определение нажатой кнопки
         key = cv2.waitKey(1) & 0xFF
 
@@ -211,7 +231,32 @@ def main():
 
     # Закрытие окна при завершении видео
     video.release()
+    output_video.release()
     cv2.destroyAllWindows()
+
+    df = pd.DataFrame(events)
+    csv_name = str(args.video).replace(".mp4", "")
+    df.to_csv(csv_name, index=False)
+    df.to_csv( f"output/events_{csv_name}.csv", index=False)
+
+    empty_times = [e["timestamp_sec"] for e in events if e["event"] == "table_empty"]
+    occupied_times = [e["timestamp_sec"] for e in events if e["event"] == "table_occupied"]
+
+    # Считаем интервалы: от ухода до подхода следующего
+    intervals = []
+    j = 0
+    for empty_time in empty_times:
+        # ищем ближайшее occupied_time после empty_time
+        while j < len(occupied_times) and occupied_times[j] <= empty_time:
+            j += 1
+        if j < len(occupied_times):
+            intervals.append(occupied_times[j] - empty_time)
+
+    if intervals:
+        average_interval = np.mean(intervals)
+        print(f"Среднее время между уходом гостя и подходом следующего человека: {average_interval:.2f} сек")
+    else:
+        print("Нет данных для расчета среднего времени между уходами и подходами")
 
 
 if __name__ == "__main__":
